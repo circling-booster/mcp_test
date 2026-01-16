@@ -31,8 +31,13 @@ async def mcp_client_task(video_id: str, log_callback):
     env["MCP_TRANSPORT"] = "stdio" 
     env["PYTHONPATH"] = current_dir # 현재 폴더를 Path에 추가하여 mcp_test 패키지 인식
 
-    # [수정됨] 폴더 이름을 'mcp' -> 'mcp_test'로 변경했다고 가정하고 실행
-    # 이렇게 해야 설치된 라이브러리 'mcp'와 이름이 충돌하지 않습니다.
+    # [수정] 프록시 우회 설정 추가 (SSL 오류 해결의 핵심)
+    # 파이썬 하위 프로세스(MCP 서버 및 내부의 yt-dlp, openai)가 시스템 프록시(Mitmproxy)를 
+    # 거치지 않고 직접 인터넷에 연결되도록 설정합니다.
+    env["NO_PROXY"] = "*"
+    env["no_proxy"] = "*"
+
+    # [참고] 폴더 이름을 'mcp' -> 'mcp_test'로 변경한 구조에 맞게 실행 인자 설정
     server_params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "mcp_test.server"], 
