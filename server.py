@@ -25,7 +25,7 @@ logger = logging.getLogger("mcp_server")
 server = Server("youtube-sponsor-analyst")
 
 # OpenAI 클라이언트 (API Key가 없으면 None 처리하여 Mock 모드 지원)
-OPENAI_API_KEY = ("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # Resource 캐싱을 위한 메모리 저장소
