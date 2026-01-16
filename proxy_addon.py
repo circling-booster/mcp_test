@@ -6,84 +6,112 @@ import asyncio
 import tkinter as tk
 from tkinter import scrolledtext
 
-# Mitmproxy
+# Mitmproxy Imports
 from mitmproxy import http, ctx
 
-# MCP Client
+# MCP Client Imports
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-# Shared Queue
+# ==============================================================================
+# Shared State (Bridge between Mitmproxy and Tkinter)
+# ==============================================================================
 GUI_QUEUE = queue.Queue()
 
-# --- MCP Client Logic ---
+# ==============================================================================
+# 1. MCP Client Logic (Execution Layer)
+# ==============================================================================
 async def mcp_client_task(video_id: str, log_callback):
-    # server.py 경로 계산
-    server_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py")
+    """MCP 서버와 연결하고 Tool을 호출하는 비동기 작업"""
     
-    log_callback(f"[MCP] Connecting to Server for {video_id}...")
-    
-    # Windows 환경 변수 등 상속
-    env = os.environ.copy()
-    
+    # 서버 실행 파라미터 (현재 파이썬 환경 상속)
+    server_script = os.path.join(os.path.dirname(__file__), "server.py")
     server_params = StdioServerParameters(
         command=sys.executable,
         args=[server_script],
-        env=env
+        env=os.environ.copy()
     )
 
+    log_callback(f"Connecting to MCP Server... (Target: {video_id})")
+    
     try:
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 
-                log_callback("[MCP] Requesting Analysis (Tool Call)...")
+                # [MCP Concept: Tool Execution]
+                log_callback(">> Calling Tool: analyze_sponsor_block")
                 result = await session.call_tool(
                     "analyze_sponsor_block",
                     arguments={"video_id": video_id}
                 )
                 
+                # 결과 출력
                 content = result.content[0].text
-                log_callback(f"\n== RESULT ==\n{content}\n")
+                log_callback(f"\n[Analysis Result]\n{content}\n")
+                
+                # [MCP Concept: Resource Reading]
+                # 분석 후 생성된 리소스 읽어보기 (교육용)
+                log_callback(">> Reading Resource: youtube://transcript/...")
+                try:
+                    res = await session.read_resource(f"youtube://transcript/{video_id}")
+                    log_callback(f"[Resource Content Preview]: {str(res.contents[0].text)[:100]}...\n")
+                except Exception as e:
+                    log_callback(f"[Resource Error]: {e}")
 
     except Exception as e:
-        log_callback(f"[ERROR] MCP Fail: {str(e)}")
+        log_callback(f"[MCP Error]: {str(e)}")
 
-# --- GUI Logic ---
+# ==============================================================================
+# 2. Tkinter GUI (Interaction Layer)
+# ==============================================================================
 class InspectorGUI:
     def __init__(self):
         self.root = None
         self.current_video_id = None
         
     def start(self):
+        """GUI 메인 루프 실행 (별도 스레드에서 호출됨)"""
         self.root = tk.Tk()
-        self.root.title("YouTube MCP Inspector")
-        self.root.geometry("400x500")
-        self.root.attributes("-topmost", True) # 창을 항상 위로
+        self.root.title("MCP YouTube Inspector")
+        self.root.geometry("500x600")
         
-        tk.Label(self.root, text="Waiting for Video...", font=("Consolas", 12)).pack(pady=10)
+        # UI 구성
+        tk.Label(self.root, text="Waiting for YouTube Video...", font=("Arial", 12, "bold")).pack(pady=10)
+        self.status_lbl = tk.Label(self.root, text="Status: Idle", fg="gray")
+        self.status_lbl.pack()
         
-        self.btn = tk.Button(self.root, text="Analyze", state=tk.DISABLED, 
-                             command=self.on_analyze, bg="gray", fg="white", font=("Arial", 10, "bold"))
-        self.btn.pack(fill=tk.X, padx=10)
+        self.btn_analyze = tk.Button(self.root, text="Analyze via MCP", state=tk.DISABLED, 
+                                     command=self.on_analyze, bg="#dddddd", height=2)
+        self.btn_analyze.pack(fill=tk.X, padx=20, pady=5)
         
-        self.log_area = scrolledtext.ScrolledText(self.root)
-        self.log_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.log_area = scrolledtext.ScrolledText(self.root, height=20)
+        self.log_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
         
+        # Queue Polling 시작
         self.check_queue()
         self.root.mainloop()
 
     def check_queue(self):
+        """Mitmproxy 스레드로부터 데이터 수신"""
         try:
             while True:
-                vid = GUI_QUEUE.get_nowait()
-                self.current_video_id = vid
-                self.btn.config(state=tk.NORMAL, bg="red", text=f"Analyze: {vid}")
-                self.log(f"Detected: {vid}")
+                video_id = GUI_QUEUE.get_nowait()
+                self.handle_detection(video_id)
         except queue.Empty:
             pass
         finally:
             self.root.after(500, self.check_queue)
+
+    def handle_detection(self, video_id):
+        self.current_video_id = video_id
+        self.status_lbl.config(text=f"Detected: {video_id}", fg="blue")
+        self.btn_analyze.config(state=tk.NORMAL, bg="#4CAF50", fg="white")
+        self.log(f"Captured Video ID: {video_id}")
+        
+        # 창을 맨 앞으로
+        self.root.deiconify()
+        self.root.lift()
 
     def log(self, msg):
         self.log_area.insert(tk.END, msg + "\n")
@@ -91,30 +119,47 @@ class InspectorGUI:
 
     def on_analyze(self):
         if not self.current_video_id: return
-        self.btn.config(state=tk.DISABLED, text="Analyzing...")
-        threading.Thread(target=self.run_bridge, daemon=True).start()
+        
+        self.btn_analyze.config(state=tk.DISABLED)
+        
+        # [Concurrency Control]
+        # Tkinter 스레드에서 직접 asyncio를 돌릴 수 없으므로,
+        # 작업을 수행할 임시 스레드를 생성합니다.
+        threading.Thread(target=self.run_async_bridge, daemon=True).start()
 
-    def run_bridge(self):
+    def run_async_bridge(self):
+        """Sync(Tkinter) -> Async(MCP) 브릿지"""
         asyncio.run(mcp_client_task(self.current_video_id, self.safe_log))
-        self.root.after(0, lambda: self.btn.config(state=tk.NORMAL, text="Analyze Again"))
+        # 작업 완료 후 버튼 복구
+        self.root.after(0, lambda: self.btn_analyze.config(state=tk.NORMAL))
 
     def safe_log(self, msg):
+        """Thread-safe UI Update"""
         self.root.after(0, lambda: self.log(msg))
 
-gui = InspectorGUI()
+# 전역 GUI 인스턴스
+gui_app = InspectorGUI()
 
-# --- Mitmproxy Addon ---
-class Detector:
+# ==============================================================================
+# 3. Mitmproxy Addon (Detection Layer)
+# ==============================================================================
+class SponsorDetector:
     def running(self):
-        threading.Thread(target=gui.start, daemon=True).start()
+        """Mitmproxy 시작 시 GUI 스레드 실행"""
+        ctx.log.info("Starting GUI Thread...")
+        t = threading.Thread(target=gui_app.start, daemon=True)
+        t.start()
 
     def request(self, flow: http.HTTPFlow):
-        # YouTube Video ID 감지 로직
+        """HTTP 요청 감지"""
         if "youtube.com" in flow.request.pretty_host and "/watch" in flow.request.path:
-            if "v" in flow.request.query:
-                vid = flow.request.query["v"]
-                if vid != gui.current_video_id:
-                    GUI_QUEUE.put(vid)
-                    ctx.log.info(f"Detected: {vid}")
+            query = flow.request.query
+            if "v" in query:
+                video_id = query["v"]
+                # [Challenge Solution] Non-blocking으로 Queue에 전달
+                GUI_QUEUE.put(video_id)
+                ctx.log.info(f"YouTube Video Detected: {video_id}")
 
-addons = [Detector()]
+addons = [
+    SponsorDetector()
+]
