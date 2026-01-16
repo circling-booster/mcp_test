@@ -24,12 +24,20 @@ GUI_QUEUE = queue.Queue()
 async def mcp_client_task(video_id: str, log_callback):
     """MCP 서버와 연결하고 Tool을 호출하는 비동기 작업"""
     
-    # 서버 실행 파라미터 (현재 파이썬 환경 상속)
-    server_script = os.path.join(os.path.dirname(__file__), "server.py")
+    # [Refactored Path] mcp 패키지의 server 모듈 실행
+    # proxy_addon.py가 있는 폴더(루트)에서 실행된다고 가정
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    server_script = os.path.join(current_dir, "mcp", "server.py")
+    
+    # 서버 환경 변수 설정: 이 클라이언트는 stdio를 사용하므로 강제로 설정
+    env = os.environ.copy()
+    env["MCP_TRANSPORT"] = "stdio" 
+    env["PYTHONPATH"] = current_dir # mcp 패키지 인식을 위해
+
     server_params = StdioServerParameters(
         command=sys.executable,
         args=[server_script],
-        env=os.environ.copy()
+        env=env
     )
 
     log_callback(f"Connecting to MCP Server... (Target: {video_id})")
@@ -51,7 +59,6 @@ async def mcp_client_task(video_id: str, log_callback):
                 log_callback(f"\n[Analysis Result]\n{content}\n")
                 
                 # [MCP Concept: Resource Reading]
-                # 분석 후 생성된 리소스 읽어보기 (교육용)
                 log_callback(">> Reading Resource: youtube://transcript/...")
                 try:
                     res = await session.read_resource(f"youtube://transcript/{video_id}")
@@ -71,12 +78,11 @@ class InspectorGUI:
         self.current_video_id = None
         
     def start(self):
-        """GUI 메인 루프 실행 (별도 스레드에서 호출됨)"""
+        """GUI 메인 루프 실행"""
         self.root = tk.Tk()
         self.root.title("MCP YouTube Inspector")
         self.root.geometry("500x600")
         
-        # UI 구성
         tk.Label(self.root, text="Waiting for YouTube Video...", font=("Arial", 12, "bold")).pack(pady=10)
         self.status_lbl = tk.Label(self.root, text="Status: Idle", fg="gray")
         self.status_lbl.pack()
@@ -88,7 +94,6 @@ class InspectorGUI:
         self.log_area = scrolledtext.ScrolledText(self.root, height=20)
         self.log_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
         
-        # Queue Polling 시작
         self.check_queue()
         self.root.mainloop()
 
@@ -108,8 +113,6 @@ class InspectorGUI:
         self.status_lbl.config(text=f"Detected: {video_id}", fg="blue")
         self.btn_analyze.config(state=tk.NORMAL, bg="#4CAF50", fg="white")
         self.log(f"Captured Video ID: {video_id}")
-        
-        # 창을 맨 앞으로
         self.root.deiconify()
         self.root.lift()
 
@@ -119,25 +122,16 @@ class InspectorGUI:
 
     def on_analyze(self):
         if not self.current_video_id: return
-        
         self.btn_analyze.config(state=tk.DISABLED)
-        
-        # [Concurrency Control]
-        # Tkinter 스레드에서 직접 asyncio를 돌릴 수 없으므로,
-        # 작업을 수행할 임시 스레드를 생성합니다.
         threading.Thread(target=self.run_async_bridge, daemon=True).start()
 
     def run_async_bridge(self):
-        """Sync(Tkinter) -> Async(MCP) 브릿지"""
         asyncio.run(mcp_client_task(self.current_video_id, self.safe_log))
-        # 작업 완료 후 버튼 복구
         self.root.after(0, lambda: self.btn_analyze.config(state=tk.NORMAL))
 
     def safe_log(self, msg):
-        """Thread-safe UI Update"""
         self.root.after(0, lambda: self.log(msg))
 
-# 전역 GUI 인스턴스
 gui_app = InspectorGUI()
 
 # ==============================================================================
@@ -151,12 +145,10 @@ class SponsorDetector:
         t.start()
 
     def request(self, flow: http.HTTPFlow):
-        """HTTP 요청 감지"""
         if "youtube.com" in flow.request.pretty_host and "/watch" in flow.request.path:
             query = flow.request.query
             if "v" in query:
                 video_id = query["v"]
-                # [Challenge Solution] Non-blocking으로 Queue에 전달
                 GUI_QUEUE.put(video_id)
                 ctx.log.info(f"YouTube Video Detected: {video_id}")
 

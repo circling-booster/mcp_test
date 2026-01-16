@@ -3,3 +3,5 @@ mitmproxy
 yt-dlp
 openai
 python-dotenv
+starlette
+uvicorn
