@@ -7,11 +7,20 @@ import tkinter as tk
 from tkinter import scrolledtext
 
 # Mitmproxy Imports
-from mitmproxy import http, ctx
+from mitmproxy import http, ctx, tls
 
 # MCP Client Imports
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+# Config Import
+# Mitmdump 실행 시 현재 폴더가 경로에 포함되므로 바로 import 가능
+try:
+    from mcp_test.config import config
+except ImportError:
+    # 경로 문제 발생 시 대비
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from mcp_test.config import config
 
 # ==============================================================================
 # Shared State (Bridge between Mitmproxy and Tkinter)
@@ -29,15 +38,12 @@ async def mcp_client_task(video_id: str, log_callback):
     # 서버 환경 변수 설정
     env = os.environ.copy()
     env["MCP_TRANSPORT"] = "stdio" 
-    env["PYTHONPATH"] = current_dir # 현재 폴더를 Path에 추가하여 mcp_test 패키지 인식
+    env["PYTHONPATH"] = current_dir 
 
-    # [수정] 프록시 우회 설정 추가 (SSL 오류 해결의 핵심)
-    # 파이썬 하위 프로세스(MCP 서버 및 내부의 yt-dlp, openai)가 시스템 프록시(Mitmproxy)를 
-    # 거치지 않고 직접 인터넷에 연결되도록 설정합니다.
+    # 프록시 우회 설정 (Loop 방지)
     env["NO_PROXY"] = "*"
     env["no_proxy"] = "*"
 
-    # [참고] 폴더 이름을 'mcp' -> 'mcp_test'로 변경한 구조에 맞게 실행 인자 설정
     server_params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "mcp_test.server"], 
@@ -51,18 +57,15 @@ async def mcp_client_task(video_id: str, log_callback):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 
-                # [MCP Concept: Tool Execution]
                 log_callback(">> Calling Tool: analyze_sponsor_block")
                 result = await session.call_tool(
                     "analyze_sponsor_block",
                     arguments={"video_id": video_id}
                 )
                 
-                # 결과 출력
                 content = result.content[0].text
                 log_callback(f"\n[Analysis Result]\n{content}\n")
                 
-                # [MCP Concept: Resource Reading]
                 log_callback(">> Reading Resource: youtube://transcript/...")
                 try:
                     res = await session.read_resource(f"youtube://transcript/{video_id}")
@@ -102,7 +105,6 @@ class InspectorGUI:
         self.root.mainloop()
 
     def check_queue(self):
-        """Mitmproxy 스레드로부터 데이터 수신"""
         try:
             while True:
                 video_id = GUI_QUEUE.get_nowait()
@@ -139,7 +141,7 @@ class InspectorGUI:
 gui_app = InspectorGUI()
 
 # ==============================================================================
-# 3. Mitmproxy Addon (Detection Layer)
+# 3. Mitmproxy Addon (Detection & Filtering Layer)
 # ==============================================================================
 class SponsorDetector:
     def running(self):
@@ -147,8 +149,33 @@ class SponsorDetector:
         ctx.log.info("Starting GUI Thread...")
         t = threading.Thread(target=gui_app.start, daemon=True)
         t.start()
+        
+        # [Log] 감시 대상 도메인 출력
+        ctx.log.info(f"Target Domains for Inspection: {config.ALLOWED_DOMAINS}")
+
+    def tls_clienthello(self, data: tls.ClientHelloData):
+        """
+        [핵심 수정 사항] TLS 핸드셰이크 단계에서 도메인 필터링
+        허용된 도메인이 아니면 복호화하지 않고 무시(Ignore)합니다.
+        이렇게 하면 불필요한 트래픽을 감시하지 않으며, 보안 프로그램(Unicorn 등)과의 충돌도 방지됩니다.
+        """
+        sni = data.context.client.sni
+        if not sni:
+            return
+
+        # SNI(접속 도메인)가 허용 목록에 포함되는지 확인
+        is_allowed = any(domain in sni for domain in config.ALLOWED_DOMAINS)
+
+        if not is_allowed:
+            # 허용되지 않은 도메인은 인터셉트하지 않음 (Pass-through)
+            data.ignore_connection = True
 
     def request(self, flow: http.HTTPFlow):
+        """HTTP 요청 단계 분석"""
+        # 혹시 인터셉트된 트래픽 중에서도 한 번 더 필터링
+        if not any(d in flow.request.pretty_host for d in config.ALLOWED_DOMAINS):
+            return
+
         if "youtube.com" in flow.request.pretty_host and "/watch" in flow.request.path:
             query = flow.request.query
             if "v" in query:

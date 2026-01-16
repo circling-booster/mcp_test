@@ -1,6 +1,7 @@
 import json
 import mcp.types as types
 from .core import server, transcript_cache, openai_client, fetch_transcript, logger
+from .config import config  # [추가] 설정 가져오기
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
@@ -35,12 +36,13 @@ async def handle_call_tool(
     transcript = await fetch_transcript(video_id)
     transcript_cache[video_id] = transcript  # Resource 조회를 위해 캐싱
 
-    # 2. AI 분석 (OpenAI or Mock)
+    # 2. AI 분석 (OpenAI or Ollama)
     analysis_text = ""
     if openai_client:
         try:
+            # [수정] 설정된 모델(config.LLM_MODEL)을 사용하도록 변경
             response = await openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=config.LLM_MODEL, 
                 messages=[
                     {"role": "system", "content": "Analyze for sponsors. Return JSON summary."},
                     {"role": "user", "content": transcript}
@@ -48,14 +50,14 @@ async def handle_call_tool(
             )
             analysis_text = response.choices[0].message.content
         except Exception as e:
-            analysis_text = f"OpenAI API Error: {str(e)}"
+            analysis_text = f"LLM API Error: {str(e)}"
     else:
         # Mock Data Generation
         analysis_text = json.dumps({
             "status": "mock_success",
             "sponsor": "NordVPN (Simulated)",
             "segments": ["02:30 - 03:15"],
-            "summary": "This is a simulated analysis because OPENAI_API_KEY is missing."
+            "summary": "This is a simulated analysis because LLM Client is missing."
         }, indent=2)
 
     return [types.TextContent(type="text", text=analysis_text)]
