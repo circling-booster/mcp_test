@@ -24,19 +24,18 @@ GUI_QUEUE = queue.Queue()
 async def mcp_client_task(video_id: str, log_callback):
     """MCP 서버와 연결하고 Tool을 호출하는 비동기 작업"""
     
-    # [수정됨] mcp 패키지의 server 모듈을 실행하기 위한 설정
-    # proxy_addon.py가 있는 폴더(루트)에서 실행된다고 가정
     current_dir = os.path.dirname(os.path.abspath(__file__))
     
     # 서버 환경 변수 설정
     env = os.environ.copy()
     env["MCP_TRANSPORT"] = "stdio" 
-    env["PYTHONPATH"] = current_dir # mcp 패키지 인식을 위해 현재 폴더를 Path에 추가
+    env["PYTHONPATH"] = current_dir # 현재 폴더를 Path에 추가하여 mcp_test 패키지 인식
 
-    # [핵심 수정] 파일을 직접 실행하는 대신 모듈(-m)로 실행해야 상대 경로 import가 작동함
+    # [수정됨] 폴더 이름을 'mcp' -> 'mcp_test'로 변경했다고 가정하고 실행
+    # 이렇게 해야 설치된 라이브러리 'mcp'와 이름이 충돌하지 않습니다.
     server_params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "mcp.server"], # args=[server_script] 에서 변경됨
+        args=["-m", "mcp_test.server"], 
         env=env
     )
 
